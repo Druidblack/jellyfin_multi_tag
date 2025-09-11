@@ -10,44 +10,35 @@
   const ENABLE_PLANNED_EPISODES = true;     // подтягивать плановое число серий сезона
   const SHOW_SEASON_PROGRESS_BADGE = true;  // "Ep current/planned", если есть оба числа
 
-  // TMDb (источник планов и статуса сериала)
+  // TMDb
   const ENABLE_TMDB = true;                 // TMDb для планов по сезонам
   const ENABLE_TMDB_ENDED = true;           // TMDb как источник статуса "Ended" для сериалов
   const TMDB_API_KEY = 'API_KEY';                  // <<< вставьте свой TMDb API key
   const TMDB_LANGUAGE = 'en-US';
 
-  // Сериалы: бейдж Ended
-  const SHOW_SERIES_ENDED_BADGE = true;     // показывать красный бейдж "Ended" (только если TMDb сказал)
+  // Сериалы: бейдж Ended (только если TMDb сказал)
+  const SHOW_SERIES_ENDED_BADGE = true;
 
-  // Приоритет картинок / задержки
+  // Задержки/потоки
   const FETCH_DELAY_BEFORE_IMAGE_MS = 150;
   const FETCH_DELAY_ON_HOVER_MS      = 80;
   const FALLBACK_FETCH_TIMEOUT_MS    = 1200;
-
-  // Форс-проходы (ранние волны)
-  const FORCE_PASSES_MS = [80, 300, 900, 1800];
-
-  // Ограничения на запросы
-  const MAX_CONCURRENT_REQUESTS = 6;
-  const PROCESS_TICK_MS         = 100;
+  const FORCE_PASSES_MS              = [80, 300, 900, 1800];
+  const MAX_CONCURRENT_REQUESTS      = 6;
+  const PROCESS_TICK_MS              = 100;
 
   // Селекторы/визуал
-  const VIEW_MARGIN = 200;
-  const overlayClass = 'quality-overlay-label';
-  const wrapperClass = 'quality-overlay-label-wrapper';
+  const VIEW_MARGIN   = 200;
+  const overlayClass  = 'quality-overlay-label';
+  const wrapperClass  = 'quality-overlay-label-wrapper';
+  const TARGET_SELECTORS = ['a.cardImageContainer', '.listItemImage'].join(',');
 
-  // Бэйджи ставим ТОЛЬКО на контейнер изображения
-  const TARGET_SELECTORS = [
-    'a.cardImageContainer',   // сетка
-    '.listItemImage'          // списки с фоном
-  ].join(',');
-
-  // ===== Служебные структуры =====
+  // ===== Очередь/кэш =====
   const requestQueue = [];
-  // cache: { [itemId]: { quality, rating, seasonPlanned?, seasonCurrent?, seriesEnded? (true|false) } }
+  // cache: { [itemId]: { qualityParts: string[], audio?: {text,type}, musicFormat?, bookFormat?, rating?, seasonPlanned?, seasonCurrent?, seriesEnded? } }
   const overlayCache = {};
   const inflight = new Set();
-  const waiters = new Map();
+  const waiters  = new Map();
   const delayedTimers = new Map();
   const listenedImgs = new WeakSet();
   let activeRequests = 0;
@@ -56,14 +47,19 @@
   const observedElements = new WeakSet();
 
   // ===== Внешние кэши =====
-  // TVMaze
-  const tvmazeShowIdCache = new Map();       // "tvdb:12345"/"imdb:tt..." -> showId
-  const tvmazeSeasonOrderCache = new Map();  // `${showId}:${seasonNumber}` -> episodeOrder
-  // TMDb
-  const tmdbTvIdCache = new Map();             // 'tmdb:123'/'tvdb:123'/'imdb:tt...' -> tmdbId
-  const tmdbSeasonsSnapshotCache = new Map();  // tmdbId -> seasons[]
-  const tmdbSeasonCountCache = new Map();      // `${tmdbId}:${seasonNumber}` -> episode_count
-  const tmdbTvStatusCache = new Map();         // tmdbId -> 'Ended' | 'Returning Series' | 'Canceled' ...
+  const tvmazeShowIdCache       = new Map();
+  const tvmazeSeasonOrderCache  = new Map();
+  const tmdbTvIdCache           = new Map();
+  const tmdbSeasonsSnapshotCache= new Map();
+  const tmdbSeasonCountCache    = new Map();
+  const tmdbTvStatusCache       = new Map();
+
+  // ===== Фиксированные цвета аудио/форматов =====
+  const COLOR_ATMOS  = '#00acc1'; // cyan 600
+  const COLOR_DD51   = '#f4511e'; // deep orange 600
+  const COLOR_STEREO = '#00897b'; // teal 600
+  const COLOR_MUSIC  = '#7e57c2'; // deep purple 400 (не #8000cc)
+  const COLOR_BOOK   = '#9e9d24'; // lime 800
 
   // ===== ApiClient bootstrap =====
   const ApiClientRef =
@@ -121,6 +117,7 @@
       return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
     }
 
+    // ===== Создание бейджа =====
     function createLabel(label, type='quality', customBg=null, customTextColor=null) {
       const badge = document.createElement('div');
       badge.textContent = label;
@@ -138,7 +135,6 @@
             case 'HDR': bgColor = '#cc0000'; break;
             default: break;
           }
-          if (label === 'ATMOS') bgColor = '#ff6600';
           if (label.startsWith('DV')) bgColor = '#8000cc';
         } else if (type === 'rating') {
           bgColor = '#222';
@@ -213,11 +209,95 @@
         const m = String(profile).match(/(\d+)/); p = m ? Number(m[1]) : NaN;
       }
       if (!Number.isFinite(p)) return 'DV';
-      if (p === 8 && blId != null && String(blId).trim() !== '') return `DV P8.${blId}`;
-      return `DV P${p}`;
+      if (p === 8 && blId != null && String(blId).trim() !== '') return `DV\u00A0P8.${blId}`;
+      return `DV\u00A0P${p}`;
     }
 
-    function getQuality(videoStream, audioStreams=[]) {
+    // === Audio helpers ===
+    function getChannelsFromStream(a) {
+      if (!a) return null;
+      if (typeof a.Channels === 'number') return a.Channels;
+      const layout = String(a.ChannelLayout || a.Profile || '').toLowerCase();
+      const m = layout.match(/(\d+)\.(\d+)/);
+      if (m) {
+        const major = parseInt(m[1], 10);
+        const minor = parseInt(m[2], 10);
+        if (Number.isFinite(major) && Number.isFinite(minor)) {
+          return major + minor; // 5.1 => 6, 7.1 => 8
+        }
+      }
+      return null;
+    }
+    function pickBestAudioStream(audioStreams) {
+      if (!Array.isArray(audioStreams) || audioStreams.length === 0) return null;
+      let best = null, bestCh = -1;
+      for (const a of audioStreams) {
+        const ch = getChannelsFromStream(a) ?? 0;
+        if (ch > bestCh) { bestCh = ch; best = a; }
+      }
+      return best;
+    }
+    function detectAudioLabel(audioStreams=[]) {
+      const hasAtmos = audioStreams.some(a =>
+        /atmos/i.test(a.DisplayTitle || a.Title || '') ||
+        /atmos/i.test(a.AudioCodec || a.Codec || '')
+      );
+      if (hasAtmos) return { text: 'ATMOS', type: 'atmos' };
+
+      const best = pickBestAudioStream(audioStreams);
+      const ch = getChannelsFromStream(best) ?? 0;
+      if (ch >= 6)   return { text: 'DD\u00A05.1', type: 'dd51' };
+      if (ch >= 2)   return { text: 'Stereo',     type: 'stereo' };
+      return null;
+    }
+
+    // === Music format helpers (для альбомов) ===
+    function prettyCodecName(media) {
+      const st = media?.MediaStreams?.find(s => s.Type === 'Audio') || null;
+      const cont = String(media?.Container || '').toLowerCase();
+      const raw  = String(st?.Codec || st?.AudioCodec || media?.AudioCodec || cont).toLowerCase();
+
+      const pick = (name) => name;
+      if (/flac/.test(raw))   return pick('FLAC');
+      if (/alac/.test(raw))   return pick('ALAC');
+      if (/aac|m4a/.test(raw) || /m4a/.test(cont)) return pick('AAC');
+      if (/mp3/.test(raw))    return pick('MP3');
+      if (/opus/.test(raw))   return pick('OPUS');
+      if (/vorbis|ogg/.test(raw)) return pick('Vorbis');
+      if (/wav|lpcm|pcm/.test(raw)) return pick('WAV');
+      if (/wma/.test(raw))    return pick('WMA');
+      if (/dsd|dsf|dff/.test(raw)) return pick('DSD');
+      if (/ape/.test(raw))    return pick('APE');
+      if (cont) return cont.toUpperCase();
+      return (raw || 'AUDIO').toUpperCase();
+    }
+
+    // === E-book format helpers (для книг) ===
+    function prettyBookFormat(item, media) {
+      const cont  = String(media?.Container || item?.Container || '').toLowerCase();
+      const path  = String(media?.Path || item?.Path || '').toLowerCase();
+      const extM  = path.match(/\.([a-z0-9]+)$/i);
+      const ext   = extM ? extM[1] : '';
+
+      const src = cont || ext;
+      if (!src) return 'BOOK';
+
+      if (/epub/.test(src)) return 'EPUB';
+      if (/pdf/.test(src))  return 'PDF';
+      if (/mobi/.test(src)) return 'MOBI';
+      if (/azw3?/.test(src))return 'AZW3';
+      if (/fb2/.test(src))  return 'FB2';
+      if (/djvu/.test(src)) return 'DJVU';
+      if (/cbz/.test(src))  return 'CBZ';
+      if (/cbr/.test(src))  return 'CBR';
+      if (/docx?/.test(src))return src.includes('docx') ? 'DOCX' : 'DOC';
+      if (/rtf/.test(src))  return 'RTF';
+      if (/txt/.test(src))  return 'TXT';
+      return (src || 'BOOK').toUpperCase();
+    }
+
+    // === Сборка качества (видео + HDR/DV) и аудио ===
+    function buildQuality(videoStream, audioStreams=[]) {
       if (!videoStream) return null;
       const height = videoStream.Height || 0;
       let quality = 'SD';
@@ -231,69 +311,15 @@
       const isDV = hasDolbyVision(videoStream);
       const dvLabel = SHOW_DV_PROFILE ? getDolbyVisionBadge(videoStream) : (isDV ? 'DV' : null);
 
-      const hasAtmos = audioStreams.some(a =>
-        /atmos/i.test(a.DisplayTitle || a.Title || '') ||
-        /atmos/i.test(a.AudioCodec || '')
-      );
-
       const parts = [quality];
       if (isHDR) parts.push('HDR');
       if (dvLabel) parts.push(dvLabel);
-      if (hasAtmos) parts.push('ATMOS');
-      return parts.join(' ');
+
+      const audio = detectAudioLabel(audioStreams); // {text,type} | null
+      return { parts, audio };
     }
 
-    // ===== ItemId helpers =====
-    function extractItemIdFromBg(el) {
-      const inline = el.getAttribute('style') || '';
-      let m = inline.match(/\/Items\/([a-f0-9]{32})\/Images/i);
-      if (m) return m[1];
-      const bg = (getComputedStyle(el).backgroundImage || '');
-      m = bg.match(/\/Items\/([a-f0-9]{32})\/Images/i);
-      return m ? m[1] : null;
-    }
-    function extractItemId(el) {
-      const withDataId = el.closest('[data-id]');
-      if (withDataId?.dataset?.id && /^[a-f0-9]{32}$/i.test(withDataId.dataset.id)) {
-        return withDataId.dataset.id;
-      }
-      const link = el.closest('a[href*="id="]') || el;
-      if (link && link.href) {
-        const m = link.href.match(/(?:\?|&)id=([a-f0-9]{32})/i);
-        if (m) return m[1];
-      }
-      if (el.classList && el.classList.contains('listItemImage')) {
-        const fromBg = extractItemIdFromBg(el);
-        if (fromBg) return fromBg;
-      }
-      return null;
-    }
-
-    function allTargets() {
-      return document.querySelectorAll(TARGET_SELECTORS);
-    }
-    function isInViewport(el, margin = VIEW_MARGIN) {
-      const rect = el.getBoundingClientRect();
-      return (
-        rect.bottom >= -margin &&
-        rect.right  >= -margin &&
-        rect.top    <= (window.innerHeight || document.documentElement.clientHeight) + margin &&
-        rect.left   <= (window.innerWidth  || document.documentElement.clientWidth)  + margin
-      );
-    }
-
-    // ===== Сетевые утилиты =====
-    async function fetchJSON(url, timeoutMs = 2500) {
-      const ctrl = new AbortController();
-      const id = setTimeout(() => ctrl.abort(), timeoutMs);
-      try {
-        const r = await fetch(url, { signal: ctrl.signal });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return await r.json();
-      } finally { clearTimeout(id); }
-    }
-
-    // ===== TMDb helpers =====
+    // ===== TMDb / TVMaze =====
     function tmdbUrl(path, params = {}) {
       const u = new URL(`https://api.themoviedb.org/3${path}`);
       u.searchParams.set('api_key', TMDB_API_KEY);
@@ -302,6 +328,15 @@
         if (v != null) u.searchParams.set(k, v);
       }
       return u.toString();
+    }
+    async function fetchJSON(url, timeoutMs = 2500) {
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return await r.json();
+      } finally { clearTimeout(id); }
     }
     async function tmdbLookupTvIdByProvider(providerIds) {
       const rawTmdb = providerIds?.Tmdb ?? providerIds?.TMDb ?? providerIds?.tmdb;
@@ -333,7 +368,6 @@
     }
     function isTmdbStatusEnded(status) {
       const s = String(status || '').toLowerCase();
-      // TMDb: "Ended", "Returning Series", "Planned", "In Production", "Canceled", "Pilot"
       return s === 'ended' || s === 'canceled' || s === 'cancelled';
     }
     async function tmdbGetTvStatus(tmdbId) {
@@ -381,7 +415,7 @@
       }
     }
 
-    // ===== TVMaze helpers (фолбэк для планов) =====
+    // TVMaze (фолбэк для плана сезонов)
     async function tvmazeLookupShowIdByProvider(providerIds) {
       if (providerIds?.Tvdb) {
         const key = 'tvdb:' + String(providerIds.Tvdb);
@@ -416,84 +450,6 @@
       }
     }
 
-    // ===== Current episodes in season (в библиотеке) =====
-    async function fetchSeasonCurrentEpisodes(userId, seasonId, seasonItem) {
-      if (typeof seasonItem?.ChildCount === 'number' && seasonItem.ChildCount > 0) {
-        return seasonItem.ChildCount;
-      }
-      try {
-        const resp = await ApiClient.ajax({
-          type: 'GET',
-          url: ApiClient.getUrl('/Items', {
-            ParentId: seasonId,
-            IncludeItemTypes: 'Episode',
-            Recursive: false,
-            Limit: 1,
-            userId
-          }),
-          dataType: 'json'
-        });
-        if (typeof resp?.TotalRecordCount === 'number') return resp.TotalRecordCount;
-      } catch {}
-      return null;
-    }
-
-    // ===== Planned episodes aggregator =====
-    async function fetchPlannedSeasonEpisodes(userId, seasonItem) {
-      if (!ENABLE_PLANNED_EPISODES) return null;
-
-      const seasonNumber = typeof seasonItem?.IndexNumber === 'number' ? seasonItem.IndexNumber : null;
-      const seriesId = seasonItem?.SeriesId || seasonItem?.ParentId || null;
-      if (seasonNumber == null || !seriesId) return null;
-
-      try {
-        const series = await ApiClient.getItem(userId, seriesId);
-        const providerIds = series?.ProviderIds || {};
-
-        // TMDb приоритетно
-        if (ENABLE_TMDB && TMDB_API_KEY) {
-          const tmdbId = await tmdbLookupTvIdByProvider(providerIds);
-          if (tmdbId) {
-            const planned = await tmdbGetSeasonPlannedCount(tmdbId, seasonNumber);
-            if (typeof planned === 'number' && planned > 0) return planned;
-          }
-        }
-        // TVMaze — фолбэк
-        const showId = await tvmazeLookupShowIdByProvider(providerIds);
-        if (showId) {
-          const planned = await tvmazeGetSeasonEpisodeOrder(showId, seasonNumber);
-          if (typeof planned === 'number' && planned > 0) return planned;
-        }
-      } catch {}
-      return null;
-    }
-
-    // ===== Series ended via TMDb ONLY =====
-    async function fetchSeriesEndedFromTMDb(seriesItem) {
-      if (!ENABLE_TMDB_ENDED || !TMDB_API_KEY) return null;  // нет TMDb — нет бейджа
-      try {
-        const providerIds = seriesItem?.ProviderIds || {};
-        const tmdbId = await tmdbLookupTvIdByProvider(providerIds);
-        if (!tmdbId) return null;
-        const status = await tmdbGetTvStatus(tmdbId);
-        return status != null ? isTmdbStatusEnded(status) : null;
-      } catch { return null; }
-    }
-
-    // ===== Compose Ep badge text =====
-    function composeEpBadgeText(data) {
-      const cur = typeof data.seasonCurrent === 'number' ? data.seasonCurrent : null;
-      const plan = typeof data.seasonPlanned === 'number' ? data.seasonPlanned : null;
-
-      if (SHOW_SEASON_PROGRESS_BADGE && cur != null && plan != null && plan > 0) {
-        if (cur > plan) return `Ep ${cur}`;
-        return `Ep ${cur}/${plan}`;
-      }
-      if (plan != null) return `Ep ${plan}`;
-      if (cur != null)  return `Ep ${cur}`;
-      return null;
-    }
-
     // ===== Jellyfin helpers =====
     async function fetchFirstEpisode(userId, parentId) {
       try {
@@ -513,8 +469,40 @@
         return resp.Items?.[0] || null;
       } catch { return null; }
     }
+    async function fetchFirstAlbumTrack(userId, albumId) {
+      try {
+        const resp = await ApiClient.ajax({
+          type: 'GET',
+          url: ApiClient.getUrl('/Items', {
+            ParentId: albumId,
+            IncludeItemTypes: 'Audio',
+            Recursive: true,
+            SortBy: 'IndexNumber',
+            SortOrder: 'Ascending',
+            Limit: 1,
+            userId
+          }),
+          dataType: 'json'
+        });
+        return resp.Items?.[0] || null;
+      } catch { return null; }
+    }
 
-    // ===== API fetch per item =====
+    // ===== Compose Ep badge text =====
+    function composeEpBadgeText(data) {
+      const cur = typeof data.seasonCurrent === 'number' ? data.seasonCurrent : null;
+      const plan = typeof data.seasonPlanned === 'number' ? data.seasonPlanned : null;
+
+      if (SHOW_SEASON_PROGRESS_BADGE && cur != null && plan != null && plan > 0) {
+        if (cur > plan) return `Ep ${cur}`;
+        return `Ep ${cur}/${plan}`;
+      }
+      if (plan != null) return `Ep ${plan}`;
+      if (cur != null)  return `Ep ${cur}`;
+      return null;
+    }
+
+    // ===== Вытягивание и наполнение =====
     async function fetchAndFill(itemId) {
       if (!itemId) return;
       if (overlayCache[itemId]) { deliverToWaiters(itemId, overlayCache[itemId], itemId); return; }
@@ -527,30 +515,47 @@
       try {
         const item = await ApiClient.getItem(userId, itemId);
 
-        let qualityString = null;
-        if (item.Type === 'Series') {
+        let qualityParts = null;
+        let audioObj     = null;
+        let musicFormat  = null;
+        let bookFormat   = null;
+
+        if (item.Type === 'Series' || item.Type === 'Season') {
           const ep = await fetchFirstEpisode(userId, itemId);
           if (ep?.Id) {
             const fullEp = await ApiClient.getItem(userId, ep.Id);
             const media = fullEp?.MediaSources?.[0];
             const v = media?.MediaStreams?.find(s => s.Type === 'Video');
             const a = media?.MediaStreams?.filter(s => s.Type === 'Audio') || [];
-            if (v?.Height) qualityString = getQuality(v, a);
+            if (v?.Height) {
+              const q = buildQuality(v, a);
+              qualityParts = q?.parts || null;
+              audioObj     = q?.audio || null;
+            }
           }
-        } else if (item.Type === 'Season') {
-          const ep = await fetchFirstEpisode(userId, itemId);
-          if (ep?.Id) {
-            const fullEp = await ApiClient.getItem(userId, ep.Id);
-            const media = fullEp?.MediaSources?.[0];
-            const v = media?.MediaStreams?.find(s => s.Type === 'Video');
-            const a = media?.MediaStreams?.filter(s => s.Type === 'Audio') || [];
-            if (v?.Height) qualityString = getQuality(v, a);
+        } else if (item.Type === 'MusicAlbum') {
+          // Формат альбома (по первому треку)
+          const track = await fetchFirstAlbumTrack(userId, itemId);
+          if (track?.Id) {
+            const full = await ApiClient.getItem(userId, track.Id);
+            const media = full?.MediaSources?.[0];
+            if (media) {
+              musicFormat = prettyCodecName(media);
+            }
           }
+        } else if (item.Type === 'Book') {
+          // Формат электронной книги
+          const media = item?.MediaSources?.[0];
+          bookFormat = prettyBookFormat(item, media);
         } else {
           const media = item?.MediaSources?.[0];
           const v = media?.MediaStreams?.find(s => s.Type === 'Video');
           const a = media?.MediaStreams?.filter(s => s.Type === 'Audio') || [];
-          if (v?.Height) qualityString = getQuality(v, a);
+          if (v?.Height) {
+            const q = buildQuality(v, a);
+            qualityParts = q?.parts || null;
+            audioObj     = q?.audio || null;
+          }
         }
 
         // Рейтинг
@@ -558,44 +563,80 @@
         if (typeof item?.CommunityRating === 'number') ratingValue = item.CommunityRating;
         else if (typeof item?.CriticRating === 'number') ratingValue = item.CriticRating;
 
-        // Сразу отдаём доступное
-        const initialData = { quality: qualityString, rating: ratingValue };
+        const initialData = { rating: ratingValue };
+        if (qualityParts) initialData.qualityParts = qualityParts;
+        if (audioObj)     initialData.audio = audioObj;
+        if (musicFormat)  initialData.musicFormat = musicFormat;
+        if (bookFormat)   initialData.bookFormat  = bookFormat;
+
+        // Сезон: текущее число эпизодов — быстро, если уже есть
+        if (item.Type === 'Season' && typeof item?.ChildCount === 'number' && item.ChildCount > 0) {
+          initialData.seasonCurrent = item.ChildCount;
+        }
+
         overlayCache[itemId] = initialData;
         deliverToWaiters(itemId, initialData, itemId);
 
         // СЕРИАЛ: статус Ended ТОЛЬКО из TMDb
         if (item.Type === 'Series' && SHOW_SERIES_ENDED_BADGE) {
-          const ended = await fetchSeriesEndedFromTMDb(item); // true | false | null
-          if (ended !== null) {
-            overlayCache[itemId] = { ...overlayCache[itemId], seriesEnded: !!ended };
+          let seriesEnded = null;
+          if (ENABLE_TMDB_ENDED && TMDB_API_KEY) {
+            try {
+              const tmdbId = await tmdbLookupTvIdByProvider(item?.ProviderIds || {});
+              if (tmdbId) {
+                const status = await tmdbGetTvStatus(tmdbId);
+                seriesEnded = status != null ? isTmdbStatusEnded(status) : null;
+              }
+            } catch {}
+          }
+          if (seriesEnded !== null) {
+            overlayCache[itemId] = { ...overlayCache[itemId], seriesEnded: !!seriesEnded };
           } else {
-            // нет данных TMDb — не показываем бейдж, убедимся что флажок отсутствует
             const { seriesEnded, ...rest } = overlayCache[itemId];
             overlayCache[itemId] = rest;
           }
           updateEndedBadgeForItem(itemId);
         }
 
-        // СЕЗОН: план/текущие эпизоды
+        // СЕЗОН: добираем план/текущее (асинхронно)
         if (item.Type === 'Season') {
-          // current
-          if (typeof item?.ChildCount === 'number' && item.ChildCount > 0) {
-            overlayCache[itemId] = { ...overlayCache[itemId], seasonCurrent: item.ChildCount };
-            updateOverlaysForItem(itemId);
-          } else {
-            const current = await fetchSeasonCurrentEpisodes(userId, item.Id, item);
-            if (typeof current === 'number') {
-              overlayCache[itemId] = { ...overlayCache[itemId], seasonCurrent: current };
-              updateOverlaysForItem(itemId);
-            }
+          if (overlayCache[itemId].seasonCurrent == null) {
+            try {
+              const resp = await ApiClient.ajax({
+                type: 'GET',
+                url: ApiClient.getUrl('/Items', {
+                  ParentId: itemId,
+                  IncludeItemTypes: 'Episode',
+                  Recursive: false,
+                  Limit: 1,
+                  userId
+                }),
+                dataType: 'json'
+              });
+              if (typeof resp?.TotalRecordCount === 'number') {
+                overlayCache[itemId] = { ...overlayCache[itemId], seasonCurrent: resp.TotalRecordCount };
+                updateOverlaysForItem(itemId);
+              }
+            } catch {}
           }
-          // planned
           if (ENABLE_PLANNED_EPISODES) {
-            const planned = await fetchPlannedSeasonEpisodes(userId, item);
-            if (typeof planned === 'number' && planned > 0) {
-              overlayCache[itemId] = { ...overlayCache[itemId], seasonPlanned: planned };
-              updateOverlaysForItem(itemId);
-            }
+            try {
+              const series = await ApiClient.getItem(userId, item.SeriesId || item.ParentId);
+              const providerIds = series?.ProviderIds || {};
+              let planned = null;
+              if (ENABLE_TMDB && TMDB_API_KEY) {
+                const tmdbId = await tmdbLookupTvIdByProvider(providerIds);
+                if (tmdbId) planned = await tmdbGetSeasonPlannedCount(tmdbId, item.IndexNumber);
+              }
+              if (planned == null) {
+                const showId = await tvmazeLookupShowIdByProvider(providerIds);
+                if (showId) planned = await tvmazeGetSeasonEpisodeOrder(showId, item.IndexNumber);
+              }
+              if (typeof planned === 'number' && planned > 0) {
+                overlayCache[itemId] = { ...overlayCache[itemId], seasonPlanned: planned };
+                updateOverlaysForItem(itemId);
+              }
+            } catch {}
           }
         }
       } catch {
@@ -620,22 +661,52 @@
       wrapper.className = wrapperClass;
       if (itemIdForWrapper) wrapper.dataset.itemid = itemIdForWrapper;
 
-      // СЕРИАЛ: бейдж Ended — только если TMDb сказал (seriesEnded === true)
+      // СЕРИАЛ: Ended (только если пришло из TMDb)
       if (data.seriesEnded === true && SHOW_SERIES_ENDED_BADGE) {
         const endedBadge = createLabel('Ended', 'meta', '#c62828', '#ffffff');
         endedBadge.setAttribute('data-ended', '1');
         wrapper.appendChild(endedBadge);
       }
 
-      // Качество
-      if (data.quality) {
-        data.quality.split(' ').forEach(label => {
+      // Качество/HDR/DV
+      if (Array.isArray(data.qualityParts) && data.qualityParts.length) {
+        data.qualityParts.forEach(label => {
           const badge = createLabel(label, 'quality');
           wrapper.appendChild(badge);
         });
       }
 
-      // СЕЗОН: EP / прогресс
+      // Аудио (ATMOS/DD 5.1/Stereo) — фиксированные цвета
+      if (data.audio && data.audio.text) {
+        let bg = '#444';
+        if (data.audio.type === 'atmos')   bg = COLOR_ATMOS;
+        else if (data.audio.type === 'dd51')  bg = COLOR_DD51;
+        else if (data.audio.type === 'stereo')bg = COLOR_STEREO;
+        const txtColor = textColorForBackground(bg);
+        const audioBadge = createLabel(data.audio.text, 'audio', bg, txtColor);
+        audioBadge.setAttribute('data-audio', '1');
+        wrapper.appendChild(audioBadge);
+      }
+
+      // Музыкальные альбомы: формат (FLAC/MP3/...)
+      if (data.musicFormat) {
+        const bg = COLOR_MUSIC;
+        const txtColor = textColorForBackground(bg);
+        const musicBadge = createLabel(data.musicFormat, 'audio', bg, txtColor);
+        musicBadge.setAttribute('data-music', '1');
+        wrapper.appendChild(musicBadge);
+      }
+
+      // Электронные книги: формат (EPUB/PDF/...)
+      if (data.bookFormat) {
+        const bg = COLOR_BOOK;
+        const txtColor = textColorForBackground(bg);
+        const bookBadge = createLabel(data.bookFormat, 'meta', bg, txtColor);
+        bookBadge.setAttribute('data-book', '1');
+        wrapper.appendChild(bookBadge);
+      }
+
+      // Сезон: EP / прогресс
       const epText = composeEpBadgeText(data);
       if (epText) {
         const epBadge = createLabel(epText, 'meta');
@@ -666,25 +737,7 @@
       container.appendChild(wrapper);
     }
 
-    // Обновить/добавить/убрать бейдж Ended при асинхронном ответе TMDb
-    function updateEndedBadgeForItem(itemId) {
-      const data = overlayCache[itemId];
-      const wrappers = document.querySelectorAll(`.${wrapperClass}[data-itemid="${itemId}"]`);
-      wrappers.forEach(w => {
-        let badge = w.querySelector('.' + overlayClass + '[data-ended="1"]');
-        if (data && data.seriesEnded === true && SHOW_SERIES_ENDED_BADGE) {
-          if (!badge) {
-            badge = createLabel('Ended', 'meta', '#c62828', '#ffffff');
-            badge.setAttribute('data-ended', '1');
-            w.insertBefore(badge, w.firstChild);
-          }
-        } else {
-          if (badge) badge.remove();
-        }
-      });
-    }
-
-    // Обновить/добавить EP-бэйдж, если данные пришли позже
+    // Асинхронное обновление EP и Ended
     function updateOverlaysForItem(itemId) {
       const data = overlayCache[itemId];
       if (!data) return;
@@ -699,6 +752,22 @@
           w.appendChild(ep);
         } else {
           ep.textContent = txt;
+        }
+      });
+    }
+    function updateEndedBadgeForItem(itemId) {
+      const data = overlayCache[itemId];
+      const wrappers = document.querySelectorAll(`.${wrapperClass}[data-itemid="${itemId}"]`);
+      wrappers.forEach(w => {
+        let badge = w.querySelector('.' + overlayClass + '[data-ended="1"]');
+        if (data && data.seriesEnded === true && SHOW_SERIES_ENDED_BADGE) {
+          if (!badge) {
+            badge = createLabel('Ended', 'meta', '#c62828', '#ffffff');
+            badge.setAttribute('data-ended', '1');
+            w.insertBefore(badge, w.firstChild);
+          }
+        } else {
+          if (badge) badge.remove();
         }
       });
     }
@@ -802,6 +871,42 @@
       }
     }
 
+    // ===== ItemId helpers =====
+    function extractItemIdFromBg(el) {
+      const inline = el.getAttribute('style') || '';
+      let m = inline.match(/\/Items\/([a-f0-9]{32})\/Images/i);
+      if (m) return m[1];
+      const bg = (getComputedStyle(el).backgroundImage || '');
+      m = bg.match(/\/Items\/([a-f0-9]{32})\/Images/i);
+      return m ? m[1] : null;
+    }
+    function extractItemId(el) {
+      const withDataId = el.closest('[data-id]');
+      if (withDataId?.dataset?.id && /^[a-f0-9]{32}$/i.test(withDataId.dataset.id)) {
+        return withDataId.dataset.id;
+      }
+      const link = el.closest('a[href*="id="]') || el;
+      if (link && link.href) {
+        const m = link.href.match(/(?:\?|&)id=([a-f0-9]{32})/i);
+        if (m) return m[1];
+      }
+      if (el.classList && el.classList.contains('listItemImage')) {
+        const fromBg = extractItemIdFromBg(el);
+        if (fromBg) return fromBg;
+      }
+      return null;
+    }
+    function allTargets() { return document.querySelectorAll(TARGET_SELECTORS); }
+    function isInViewport(el, margin = VIEW_MARGIN) {
+      const rect = el.getBoundingClientRect();
+      return (
+        rect.bottom >= -margin &&
+        rect.right  >= -margin &&
+        rect.top    <= (window.innerHeight || document.documentElement.clientHeight) + margin &&
+        rect.left   <= (window.innerWidth  || document.documentElement.clientWidth)  + margin
+      );
+    }
+
     // ===== Наблюдатели, ховеры и форсы =====
     function observeIntersections() {
       if (intersectionObserver) intersectionObserver.disconnect();
@@ -825,13 +930,11 @@
           } else {
             scheduleFetch(itemId, FETCH_DELAY_BEFORE_IMAGE_MS);
           }
-
           observeImageReadiness(el);
         }
       }, { rootMargin: VIEW_MARGIN + 'px' });
       scanTargets();
     }
-
     function registerWaiter(itemId, container) {
       let set = waiters.get(itemId);
       if (!set) { set = new Set(); waiters.set(itemId, set); }
@@ -840,12 +943,9 @@
         deliverToWaiters(itemId, overlayCache[itemId], itemId);
       }
     }
-
     function scanTargets() {
       allTargets().forEach(el => {
-        if (!observedElements.has(el)) {
-          intersectionObserver.observe(el);
-        }
+        if (!observedElements.has(el)) intersectionObserver.observe(el);
         observeImageReadiness(el);
       });
     }
@@ -870,7 +970,6 @@
         scheduleFetch(itemId, isImageReady(el) ? 0 : FETCH_DELAY_BEFORE_IMAGE_MS);
       });
     }
-
     function cleanupWrongPlacements() {
       document.querySelectorAll(`.${wrapperClass}`).forEach(w => {
         const p = w.parentElement;
@@ -883,9 +982,7 @@
     function scheduleForcePasses() {
       forcePassTimerIds.forEach(id => clearTimeout(id));
       forcePassTimerIds = [];
-
       cleanupWrongPlacements();
-
       FORCE_PASSES_MS.forEach(ms => {
         const id = setTimeout(() => {
           scanTargets();
@@ -927,6 +1024,7 @@
       }
     });
 
+    // ===== Init =====
     addStyles();
     observeIntersections();
     mutationObserver.observe(document.body, { childList: true, subtree: true });
