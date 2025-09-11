@@ -1,8 +1,9 @@
 # jellyfin_multi_tag
 **Adds tags with information about quality, number of episodes, etc.**
-![logo](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/1.jpg)
+![logo](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/8.jpg)
 ![logo2](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/2.jpg)
 ![logo3](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/3.jpg)
+![logo3](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/9.jpg)
 
 It can display the following information:
 1. Video Resolution, hrd ,dv
@@ -10,6 +11,9 @@ It can display the following information:
 3. Rating of a movie, series, season, or episode
 4. The completeness of the series
 5. It shows how many episodes you have and how many in a season.
+6. Shows formal audio for movies
+7. Shows the format of music albums
+8. Shows the format of e-books
 
 #  For installation
 1. Install the plugin [JavaScript Injector Plugin](https://github.com/n00bcodr/Jellyfin-JavaScript-Injector)
