@@ -9978,7 +9978,7 @@
       }
       if (!el) {
         const tc = textColorForBackground(AGE_BADGE_BG);
-        el = createLabel('Died', 'meta', AGE_BADGE_BG, tc);
+        el = createLabel('They Dead', 'meta', AGE_BADGE_BG, tc);
         el.classList.add(personDeadBadgeClass);
         el.setAttribute('data-dead', '1');
         container.appendChild(el);
@@ -10966,3 +10966,4 @@ function computeBottomOffsetForAge(container) {
     refreshContextReleaseDate();
   }
 })();
+
