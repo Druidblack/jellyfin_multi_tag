@@ -3,6 +3,7 @@
 ![logo](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/8.jpg)
 ![logo2](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/2.jpg)
 ![logo3](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/3.jpg)
+![logo4](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/4.png)
 ![logo3](https://github.com/Druidblack/jellyfin_multi_tag/blob/main/Img/9.jpg)
 
 It can display the following information:
