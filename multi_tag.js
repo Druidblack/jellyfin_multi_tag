@@ -9939,7 +9939,7 @@
       // У Person в Jellyfin EndDate часто используется как дата смерти
       const d1 = parseDateOnlyUtc(item?.EndDate);
       if (d1) return d1;
-      const d2 = parseDateOnlyUtc(item?.DeathDate ?? item?.DateOfDeath ?? item?.Died ?? null);
+      const d2 = parseDateOnlyUtc(item?.DeathDate ?? item?.DateOfDeath ?? item?. ?? null);
       if (d2) return d2;
       return null;
     }
@@ -9978,7 +9978,7 @@
       }
       if (!el) {
         const tc = textColorForBackground(AGE_BADGE_BG);
-        el = createLabel('They Dead', 'meta', AGE_BADGE_BG, tc);
+        el = createLabel('Deceased', 'meta', AGE_BADGE_BG, tc);
         el.classList.add(personDeadBadgeClass);
         el.setAttribute('data-dead', '1');
         container.appendChild(el);
@@ -10966,4 +10966,5 @@ function computeBottomOffsetForAge(container) {
     refreshContextReleaseDate();
   }
 })();
+
 
