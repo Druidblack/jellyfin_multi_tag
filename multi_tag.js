@@ -9939,7 +9939,7 @@
       // У Person в Jellyfin EndDate часто используется как дата смерти
       const d1 = parseDateOnlyUtc(item?.EndDate);
       if (d1) return d1;
-      const d2 = parseDateOnlyUtc(item?.DeathDate ?? item?.DateOfDeath ?? item?. ?? null);
+      const d2 = parseDateOnlyUtc(item?.DeathDate ?? item?.DateOfDeath ?? item?.Died ?? null);
       if (d2) return d2;
       return null;
     }
@@ -10966,5 +10966,3 @@ function computeBottomOffsetForAge(container) {
     refreshContextReleaseDate();
   }
 })();
-
-
